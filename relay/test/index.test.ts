@@ -142,6 +142,15 @@ describe("POST /talk", () => {
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(MP3);
   });
 
+  it("returns 502 when the TTS model returns an object without audio", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const output of [{}, { audio: null }]) {
+      const { env } = makeEnv({ "@cf/myshell-ai/melotts": () => output });
+      const res = await worker.fetch(talk(new Uint8Array(4)), env);
+      expect(res.status).toBe(502);
+    }
+  });
+
   it("wraps the PCM in a 16 kHz mono 16-bit WAV header", async () => {
     const { env, run } = makeEnv();
     const pcm = new Uint8Array(1000).map((_, i) => i % 256);

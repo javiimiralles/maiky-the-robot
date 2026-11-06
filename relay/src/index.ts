@@ -134,5 +134,9 @@ function toBase64(bytes: Uint8Array): string {
 async function audioBytes(output: unknown): Promise<Uint8Array> {
   const audio = (output as { audio?: unknown } | null)?.audio;
   if (typeof audio === "string") return Uint8Array.from(atob(audio), (c) => c.charCodeAt(0));
-  return new Uint8Array(await new Response(output as BodyInit).arrayBuffer());
+  // Anything else must be binary: a plain object would otherwise become the text "[object Object]".
+  if (output instanceof ReadableStream || output instanceof ArrayBuffer || ArrayBuffer.isView(output)) {
+    return new Uint8Array(await new Response(output).arrayBuffer());
+  }
+  throw new Error("TTS model returned no audio");
 }
