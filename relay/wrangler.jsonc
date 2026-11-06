@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "maiky-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  // Workers AI always runs on Cloudflare, even under `wrangler dev` (needs `wrangler login`).
+  "ai": {
+    "binding": "AI"
+  }
+  // RELAY_TOKEN: `.dev.vars` locally, `wrangler secret put RELAY_TOKEN` once deployed.
+}

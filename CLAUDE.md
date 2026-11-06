@@ -13,6 +13,11 @@ Desktop companion robot built on an ESP32. It listens to the user, sends the con
 - The components used in the current version are listed in `COMPONENTS.md`. Treat it as the source of truth.
 - Do not assume a component or pin exists unless it is in `COMPONENTS.md`. When the hardware changes, update that file in the same commit.
 
+## Repository layout
+
+- `src/` holds the ESP32 firmware (PlatformIO). `relay/` holds the Cloudflare Worker that connects Maiky to the AI services.
+- The firmware reaches AI services only through the relay, so API keys and model choices never live on the device.
+
 ## Code and docs
 
 - All code, comments, and documentation are written in English.
