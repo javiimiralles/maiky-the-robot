@@ -18,14 +18,17 @@ Each question is independent: Maiky does not remember earlier turns yet. Needs t
 | No relay | The relay is not running or not reachable at `RELAY_HOST:RELAY_PORT`. |
 | Bad token | `RELAY_TOKEN` differs between `src/secrets.h` and `relay/.dev.vars`. |
 | Didn't hear | The relay found no speech in the recording. |
-| Error &lt;code&gt; | The relay answered with that HTTP status (502 = an AI service failed). |
+| Error &lt;code&gt; | The relay answered with that HTTP status (502 = an AI service failed or VoiceStudio is not running; the relay terminal shows which). |
 | No memory | Not enough RAM to decode the answer. |
 
 ## Run the relay
 
-Maiky talks to the AI through a small Cloudflare Worker in [relay/](relay/). It turns your voice into text (Whisper), asks a chat model (Gemma) for an answer, and sends the answer back as speech (MeloTTS). For now it runs on your PC and uses the Workers AI free plan (10,000 neurons per day).
+Maiky talks to the AI through a small Cloudflare Worker in [relay/](relay/). It turns your voice into text (Whisper) and asks a chat model (Gemma) for an answer on the Workers AI free plan (10,000 neurons per day), then has [VoiceStudio](https://github.com/debpalash/VoiceStudio) speak the answer. For now everything runs on your PC.
 
-Requires [Node.js](https://nodejs.org/) and a free Cloudflare account.
+Requires [Node.js](https://nodejs.org/), a free Cloudflare account and VoiceStudio:
+
+1. Install and open VoiceStudio, and accept the licence of its active voice engine (Spanish works with the default OmniVoice engine). Keep the app open: the relay calls its local API at `http://127.0.0.1:3900`.
+2. Optional: save a voice profile in VoiceStudio and put its id in `VOICESTUDIO_VOICE` in [relay/wrangler.jsonc](relay/wrangler.jsonc). With `"default"` the engine picks the voice itself.
 
 ```sh
 cd relay
@@ -36,7 +39,7 @@ npm run dev                      # serves POST /talk on port 8787 on every netwo
 npm test                         # unit tests, no Cloudflare account needed
 ```
 
-The AI models always run on Cloudflare, even under `npm run dev`, so every turn uses the free daily quota. If the ESP32 cannot reach the relay, allow port 8787 in the PC firewall.
+Whisper and Gemma always run on Cloudflare, even under `npm run dev`, so every turn uses the free daily quota. If the ESP32 cannot reach the relay, allow `workerd.exe` from `relay\node_modules` on private networks in Windows Firewall.
 
 ## Build and flash
 

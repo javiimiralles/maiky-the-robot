@@ -38,7 +38,8 @@ constexpr int MIC_SHIFT = 11;
 // The relay accepts at most 15 s of 16-bit mono audio.
 constexpr size_t MAX_UPLOAD_BYTES = 15 * SAMPLE_RATE * sizeof(int16_t);
 constexpr int32_t CONNECT_TIMEOUT_MS = 3000;
-constexpr unsigned long ANSWER_TIMEOUT_MS = 30000;  // speech-to-text + LLM + text-to-speech
+// Speech-to-text + LLM + text-to-speech. VoiceStudio renders the whole answer first and is slow without a GPU.
+constexpr unsigned long ANSWER_TIMEOUT_MS = 60000;
 constexpr unsigned long READ_TIMEOUT_MS = 5000;
 
 // A 3 W speaker at 5V is already very loud at 25%, so stay well below it.

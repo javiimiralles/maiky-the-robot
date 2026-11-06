@@ -1,23 +1,34 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 
 const TOKEN = "test-token";
+const VOICESTUDIO_URL = "http://127.0.0.1:3900";
 const MP3 = new Uint8Array([0xff, 0xfb, 0x90, 0x44, 1, 2, 3]);
 const REPLY = "¡Hola! Soy Maiky.";
 
-const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 const fromBase64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
-function makeEnv(overrides: Partial<Record<string, (input: any) => unknown>> = {}) {
+// Workers AI does speech-to-text and the reply; VoiceStudio (a plain HTTP fetch) does the speech.
+function makeEnv(
+  overrides: Partial<Record<string, (input: any) => unknown>> = {},
+  voiceStudio: () => Response | Promise<Response> = () => new Response(MP3, { headers: { "Content-Type": "audio/mpeg" } }),
+) {
   const outputs: Record<string, (input: any) => unknown> = {
     "@cf/openai/whisper-large-v3-turbo": () => ({ text: " Hola, ¿qué tal? " }),
     "@cf/google/gemma-4-26b-a4b-it": () => ({ choices: [{ message: { role: "assistant", content: REPLY } }] }),
-    "@cf/myshell-ai/melotts": () => ({ audio: base64(MP3) }),
     ...overrides,
   };
   const run = vi.fn(async (model: string, input: unknown) => outputs[model](input));
-  return { env: { RELAY_TOKEN: TOKEN, AI: { run } } as any, run };
+  const speech = vi.fn(async (_url: string, _init: RequestInit) => voiceStudio());
+  vi.stubGlobal("fetch", speech);
+  const env = { RELAY_TOKEN: TOKEN, AI: { run }, VOICESTUDIO_URL, VOICESTUDIO_VOICE: "default" } as any;
+  return { env, run, speech };
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 function talk(body?: BodyInit | null, headers: Record<string, string> = { Authorization: `Bearer ${TOKEN}` }) {
   return new Request("http://relay.local/talk", { method: "POST", headers, body, duplex: "half" } as RequestInit);
@@ -101,7 +112,7 @@ describe("POST /talk", () => {
   });
 
   it("returns the MP3 answer for a chunked PCM upload", async () => {
-    const { env, run } = makeEnv();
+    const { env, run, speech } = makeEnv();
     const chunks = [new Uint8Array([1, 0, 2]), new Uint8Array([0, 3, 0])];
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -119,7 +130,6 @@ describe("POST /talk", () => {
     expect(run.mock.calls.map((c) => c[0])).toEqual([
       "@cf/openai/whisper-large-v3-turbo",
       "@cf/google/gemma-4-26b-a4b-it",
-      "@cf/myshell-ai/melotts",
     ]);
     const [, sttInput] = run.mock.calls[0] as [string, any];
     expect(sttInput.language).toBe("es");
@@ -130,24 +140,42 @@ describe("POST /talk", () => {
     expect(chatInput.messages[0].content).toMatch(/Spanish/);
     expect(chatInput.messages.slice(1)).toEqual([{ role: "user", content: "Hola, ¿qué tal?" }]);
 
-    expect(run.mock.calls[2][1]).toEqual({ prompt: REPLY, lang: "es" });
-  });
-
-  it("accepts a TTS model that returns binary audio", async () => {
-    const { env } = makeEnv({
-      "@cf/myshell-ai/melotts": () => new Response(MP3).body,
+    expect(speech).toHaveBeenCalledTimes(1);
+    const [url, init] = speech.mock.calls[0];
+    expect(url).toBe(`${VOICESTUDIO_URL}/v1/audio/speech`);
+    expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
+    expect(new Headers(init.headers).has("Authorization")).toBe(false);
+    expect(JSON.parse(init.body as string)).toEqual({
+      model: "tts-1",
+      input: REPLY,
+      voice: "default",
+      response_format: "mp3",
+      language: "es",
     });
-    const res = await worker.fetch(talk(new Uint8Array(4)), env);
-    expect(res.status).toBe(200);
-    expect(new Uint8Array(await res.arrayBuffer())).toEqual(MP3);
   });
 
-  it("returns 502 when the TTS model returns an object without audio", async () => {
+  it("sends the configured voice and API key to VoiceStudio", async () => {
+    const { env, speech } = makeEnv();
+    const configured = { ...env, VOICESTUDIO_VOICE: "maiky", VOICESTUDIO_API_KEY: "vs-key" };
+    expect((await worker.fetch(talk(new Uint8Array(4)), configured)).status).toBe(200);
+    const [, init] = speech.mock.calls[0];
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer vs-key");
+    expect(JSON.parse(init.body as string).voice).toBe("maiky");
+  });
+
+  it("returns 502 when VoiceStudio fails, is not running, or returns no audio", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    for (const output of [{}, { audio: null }]) {
-      const { env } = makeEnv({ "@cf/myshell-ai/melotts": () => output });
+    const failures = [
+      () => new Response('{"error":{"message":"busy"}}', { status: 503 }),
+      () => Promise.reject(new TypeError("fetch failed")),
+      () => new Response(new Uint8Array(0), { headers: { "Content-Type": "audio/mpeg" } }),
+    ];
+    for (const failure of failures) {
+      const { env } = makeEnv({}, failure);
       const res = await worker.fetch(talk(new Uint8Array(4)), env);
       expect(res.status).toBe(502);
+      expect(res.headers.get("Content-Type")).toMatch(/^text\/plain/);
     }
   });
 

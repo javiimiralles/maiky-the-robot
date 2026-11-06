@@ -1,11 +1,8 @@
-// Relay between Maiky (ESP32) and Cloudflare Workers AI: PCM in, spoken MP3 answer out.
+// Relay between Maiky (ESP32) and the AI services: PCM in, spoken MP3 answer out.
+// Speech-to-text and the reply run on Cloudflare Workers AI; the voice comes from VoiceStudio.
 
 const STT_MODEL = "@cf/openai/whisper-large-v3-turbo";
 const CHAT_MODEL = "@cf/google/gemma-4-26b-a4b-it";
-// To swap the voice, change TTS_MODEL and ttsInput together,
-// e.g. "@cf/deepgram/aura-2-es" with { text, encoding: "mp3" }.
-const TTS_MODEL = "@cf/myshell-ai/melotts";
-const ttsInput = (text: string) => ({ prompt: text, lang: "es" });
 
 const SYSTEM_PROMPT =
   "You are Maiky, a small and friendly desktop robot. " +
@@ -19,6 +16,9 @@ const MAX_PCM_BYTES = 15 * SAMPLE_RATE * 2; // 15 s of 16-bit mono = 480,000 byt
 interface Env {
   AI: Ai;
   RELAY_TOKEN?: string;
+  VOICESTUDIO_URL: string;
+  VOICESTUDIO_VOICE: string;
+  VOICESTUDIO_API_KEY?: string;
 }
 
 export default {
@@ -52,8 +52,8 @@ export default {
       if (!reply) throw new Error("Chat model returned no text");
       console.log(`Reply: ${reply}`);
 
-      const mp3 = await audioBytes(await env.AI.run(TTS_MODEL, ttsInput(reply)));
-      if (!mp3.length) throw new Error("TTS model returned no audio");
+      const mp3 = await speak(reply, env);
+      if (!mp3.length) throw new Error("VoiceStudio returned no audio");
       return new Response(mp3, { headers: { "Content-Type": "audio/mpeg" } });
     } catch (err) {
       console.error("AI call failed:", err);
@@ -130,13 +130,23 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-// TTS models answer either { audio: base64 } (MeloTTS) or raw binary audio (e.g. Aura).
-async function audioBytes(output: unknown): Promise<Uint8Array> {
-  const audio = (output as { audio?: unknown } | null)?.audio;
-  if (typeof audio === "string") return Uint8Array.from(atob(audio), (c) => c.charCodeAt(0));
-  // Anything else must be binary: a plain object would otherwise become the text "[object Object]".
-  if (output instanceof ReadableStream || output instanceof ArrayBuffer || ArrayBuffer.isView(output)) {
-    return new Uint8Array(await new Response(output).arrayBuffer());
-  }
-  throw new Error("TTS model returned no audio");
+// VoiceStudio's OpenAI-compatible endpoint answers with the raw MP3 bytes.
+// "tts-1" means whichever engine is active in the VoiceStudio app. Callers on the
+// same machine need no key; VOICESTUDIO_API_KEY is for a remote or Docker install.
+async function speak(text: string, env: Env): Promise<Uint8Array> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (env.VOICESTUDIO_API_KEY) headers.Authorization = `Bearer ${env.VOICESTUDIO_API_KEY}`;
+  const res = await fetch(`${env.VOICESTUDIO_URL}/v1/audio/speech`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: "tts-1",
+      input: text,
+      voice: env.VOICESTUDIO_VOICE,
+      response_format: "mp3",
+      language: "es",
+    }),
+  });
+  if (!res.ok) throw new Error(`VoiceStudio answered ${res.status}: ${await res.text()}`);
+  return new Uint8Array(await res.arrayBuffer());
 }
