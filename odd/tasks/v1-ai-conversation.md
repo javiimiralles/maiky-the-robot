@@ -22,8 +22,8 @@ Delivery: `ask-on-risk` (forecast ~550 authored lines, chain strategy pending be
 | ID | Task | Specs | Route | Status | Evidence |
 |----|------|-------|-------|--------|----------|
 | T1 | Relay Worker in `relay/` with tests | S2, S3, S5, S6 | delegated (writer trigger: parallel unit, disjoint surface `relay/**`) | done | RED 12/12 failing on a 501 stub → GREEN 12/12; typecheck OK; `wrangler deploy --dry-run` OK; local workerd smoke test (401/400/413/404/405). Commit: relay commit on `v1` |
-| T2 | Firmware: Wi-Fi + streamed talk flow + MP3 playback | S1, S4, S5, S6, S7 | delegated (writer trigger: parallel unit, disjoint surface `src/`, `platformio.ini`, `.gitignore`) | pending | |
-| T3 | Docs: README v1 section, repo layout rule in CLAUDE.md/AGENTS.md | S3, S6 | inline (parent, shared files) | pending | |
+| T2 | Firmware: Wi-Fi + streamed talk flow + MP3 playback | S1, S4, S5, S6, S7 | delegated (writer trigger: parallel unit, disjoint surface `src/`, `platformio.ini`, `.gitignore`) | done (hardware test pending, by the user) | Test-first exception: no on-device runner, network/hardware I/O. `pio run` SUCCESS, RAM 15.2%, Flash 85.7%; `src/secrets.h` git-ignored. Commit: firmware commit on `v1` |
+| T3 | Docs: README v1 section, repo layout rule in CLAUDE.md/AGENTS.md | S3, S6 | inline (parent, shared files) | done | README relay section + layout rule in relay commit; README v1 usage, status table and secrets step in firmware commit |
 | T4 | Independent verification of the feature | all | delegated (verification trigger: Risk item 5, new dependencies) | pending | |
 
 ## Log
@@ -36,4 +36,5 @@ Delivery: `ask-on-risk` (forecast ~550 authored lines, chain strategy pending be
 - **L6 (decision):** The plan's firmware tasks (Wi-Fi, talk flow) merged into T2 because they share `src/main.cpp` and form one behavior. MP3 is the response format so the TTS can change inside the relay only.
 - **L7 (evidence, T1):** The MeloTTS model page lists "Planned Deprecation | 11/15/2026" with no replacement named. The other Workers AI TTS models are Deepgram partner models: `aura-2-es` (Spanish, $0.03 per 1k characters), `aura-2-en`, `aura-1`. The relay already accepts binary MP3 from Aura, so the swap is `TTS_MODEL` + `ttsInput`. Not yet verified live: Whisper `language: "es"`, MeloTTS `lang: "es"`, `Content-Length` on the 200 MP3 response.
 - **L8 (T3 partial):** README "Run the relay" section and the repository-layout rule in CLAUDE.md/AGENTS.md go with the relay commit; the README usage and secrets steps go with the firmware commit.
-- **Next:** finish T2, then T3, then T4. Open decision for the user: TTS after MeloTTS is retired on 2026-11-15.
+- **L9 (evidence, T2):** MP3 decoding uses pschatzmann/arduino-libhelix pinned to git tag `v0.9.4` (not in the PlatformIO registry; decoder only, no I2S driver; GPLv3). Unverified until the hardware test: free heap during a turn, loop-task stack depth during decoding, Wi-Fi upload stalls longer than the 128 ms mic buffer. Flash is at 85.7%, so later versions may need a larger app partition.
+- **Next:** T4 independent verification, then native review of the relay and firmware commits, then the user's hardware test. Open decision for the user: TTS after MeloTTS is retired on 2026-11-15.

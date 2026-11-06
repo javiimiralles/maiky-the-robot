@@ -2,13 +2,24 @@
 
 Desktop companion robot built on an ESP32. Hardware and wiring: [COMPONENTS.md](COMPONENTS.md).
 
-## v0 — hardware test
+## v1 — talk to Maiky
 
-![Maiky v0: ESP32 wired to a breadboard with the amplifier, speaker, three buttons and the OLED showing its face](images/maiky.jpeg)
+![Maiky: ESP32 wired to a breadboard with the amplifier, speaker, three buttons and the OLED showing its face](images/maiky.jpeg)
 
-- **Button 1** (hold): record from the microphone; release to play it back.
+- **Button 1** (hold): ask something; release to hear the answer. The screen shows "Listening...", "Thinking..." and "Speaking...".
 - **Button 2**: play a 440 Hz test tone.
 - **Button 3**: cycle the volume (5%, 10%, 20%).
+
+Each question is independent: Maiky does not remember earlier turns yet. Needs the [relay](#run-the-relay) running.
+
+| Screen | Meaning |
+|--------|---------|
+| No Wi-Fi | Could not join the network in `src/secrets.h`. Button 1 retries. |
+| No relay | The relay is not running or not reachable at `RELAY_HOST:RELAY_PORT`. |
+| Bad token | `RELAY_TOKEN` differs between `src/secrets.h` and `relay/.dev.vars`. |
+| Didn't hear | The relay found no speech in the recording. |
+| Error &lt;code&gt; | The relay answered with that HTTP status (502 = an AI service failed). |
+| No memory | Not enough RAM to decode the answer. |
 
 ## Run the relay
 
@@ -32,6 +43,7 @@ The AI models always run on Cloudflare, even under `npm run dev`, so every turn 
 Requires [PlatformIO](https://platformio.org/).
 
 ```sh
+cp src/secrets.example.h src/secrets.h   # then fill in Wi-Fi, the PC's LAN IP and the relay token
 pio run -t upload      # build and flash
 pio device monitor     # serial log (115200 baud)
 ```

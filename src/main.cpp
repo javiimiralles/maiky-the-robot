@@ -1,12 +1,20 @@
-// Maiky v0.1 - hardware test.
-// Button 1 (hold): record from the mic, release to play it back.
+// Maiky v1 - AI conversation.
+// Button 1 (hold): stream your question to the relay, release to hear the AI answer.
 // Button 2: play a test tone. Button 3: cycle the volume.
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <WiFi.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <MP3DecoderHelix.h>
 #include <driver/i2s.h>
+
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#error "Missing src/secrets.h: copy src/secrets.example.h to src/secrets.h and fill in your values"
+#endif
 
 // Pins (see COMPONENTS.md)
 constexpr int PIN_OLED_SDA = 21;
@@ -24,9 +32,14 @@ constexpr int PIN_BTN_VOLUME = 23;
 constexpr i2s_port_t MIC_PORT = I2S_NUM_0;
 constexpr i2s_port_t AMP_PORT = I2S_NUM_1;
 constexpr int SAMPLE_RATE = 16000;
-constexpr size_t MAX_RECORD_SAMPLES = SAMPLE_RATE * 3;  // 3 s of 16-bit mono
 // 24-bit mic data in a 32-bit slot -> 16-bit. Speech sits ~60 dB below full scale, so keep extra gain.
 constexpr int MIC_SHIFT = 11;
+
+// The relay accepts at most 15 s of 16-bit mono audio.
+constexpr size_t MAX_UPLOAD_BYTES = 15 * SAMPLE_RATE * sizeof(int16_t);
+constexpr int32_t CONNECT_TIMEOUT_MS = 3000;
+constexpr unsigned long ANSWER_TIMEOUT_MS = 30000;  // speech-to-text + LLM + text-to-speech
+constexpr unsigned long READ_TIMEOUT_MS = 5000;
 
 // A 3 W speaker at 5V is already very loud at 25%, so stay well below it.
 constexpr float VOLUMES[] = {0.05f, 0.1f, 0.2f};
@@ -34,8 +47,7 @@ constexpr int VOLUME_COUNT = sizeof(VOLUMES) / sizeof(VOLUMES[0]);
 int volumeIndex = 0;
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
-int16_t *recording = nullptr;
-size_t recordCapacity = 0;
+uint32_t ampRate = SAMPLE_RATE;
 
 void drawFace(const char *status, bool mouthOpen) {
   display.clearDisplay();
@@ -105,25 +117,50 @@ void setupAmp() {
   }
 }
 
-size_t record() {
+// Tries for 10 s so a missing network never blocks the robot.
+bool connectWifi() {
+  drawFace("Wi-Fi...", false);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.setSleep(false);  // modem sleep delays TCP ACKs and stalls the audio upload
+  for (int i = 0; i < 100 && WiFi.status() != WL_CONNECTED; i++) delay(100);
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Wi-Fi connection failed");
+    return false;
+  }
+  Serial.printf("Wi-Fi IP: %s\n", WiFi.localIP().toString().c_str());
+  return true;
+}
+
+// Streams mic audio as HTTP chunks while Button 1 is held, up to the relay's limit.
+// Stops early if the relay already answered (e.g. a bad token) or the connection drops.
+void streamMic(WiFiClient &client) {
   int32_t raw[256];
-  size_t count = 0;
+  int16_t pcm[128];
+  uint8_t chunk[8 + sizeof(pcm) + 2];
+  size_t sent = 0;
   int32_t peak[2] = {0, 0};
-  i2s_zero_dma_buffer(MIC_PORT);  // drop audio captured before the button press
-  while (digitalRead(PIN_BTN_TALK) == LOW && count < recordCapacity) {
+  while (digitalRead(PIN_BTN_TALK) == LOW && sent < MAX_UPLOAD_BYTES && !client.available()) {
     size_t bytesRead = 0;
     i2s_read(MIC_PORT, raw, sizeof(raw), &bytesRead, portMAX_DELAY);
-    for (size_t i = 0; i + 1 < bytesRead / sizeof(int32_t) && count < recordCapacity; i += 2) {
+    size_t count = 0;
+    for (size_t i = 0; i + 1 < bytesRead / sizeof(int32_t) && sent + count * sizeof(int16_t) < MAX_UPLOAD_BYTES; i += 2) {
       int32_t a = raw[i] >> MIC_SHIFT;
       int32_t b = raw[i + 1] >> MIC_SHIFT;
       peak[0] = max(peak[0], abs(a));
       peak[1] = max(peak[1], abs(b));
-      recording[count++] = constrain(a + b, INT16_MIN, INT16_MAX);
+      pcm[count++] = constrain(a + b, INT16_MIN, INT16_MAX);
     }
+    if (count == 0) continue;  // an empty chunk would end the request body
+    // One HTTP chunk: hex size, CRLF, data, CRLF. Copied so the int16 samples stay aligned.
+    size_t bytes = count * sizeof(int16_t);
+    size_t head = sprintf((char *)chunk, "%X\r\n", (unsigned)bytes);
+    memcpy(chunk + head, pcm, bytes);
+    memcpy(chunk + head + bytes, "\r\n", 2);
+    if (client.write(chunk, head + bytes + 2) != head + bytes + 2) break;  // relay gone
+    sent += bytes;
   }
   // Per slot: 0 = no data, a few thousand while talking = OK, ~32767 even in silence = garbage.
-  Serial.printf("Recorded %u samples, peak slot0 %ld, slot1 %ld\n", count, peak[0], peak[1]);
-  return count;
+  Serial.printf("Sent %u bytes, peak slot0 %ld, slot1 %ld\n", sent, peak[0], peak[1]);
 }
 
 void play(const int16_t *samples, size_t count) {
@@ -139,6 +176,102 @@ void play(const int16_t *samples, size_t count) {
     size_t written = 0;
     i2s_write(AMP_PORT, frames, n * 2 * sizeof(int16_t), &written, portMAX_DELAY);
   }
+}
+
+// Decoder output: match the amp clock to the MP3 and fold stereo into mono for play().
+void playDecoded(MP3FrameInfo &info, short *pcm, size_t len, void *) {
+  if ((uint32_t)info.samprate != ampRate) {
+    ampRate = info.samprate;
+    i2s_set_sample_rates(AMP_PORT, ampRate);
+    Serial.printf("MP3: %d Hz, %d channel(s)\n", info.samprate, info.nChans);
+  }
+  if (info.nChans == 2) {
+    len /= 2;
+    for (size_t i = 0; i < len; i++) pcm[i] = (pcm[2 * i] + pcm[2 * i + 1]) / 2;
+  }
+  play(pcm, len);
+}
+
+libhelix::MP3DecoderHelix mp3(playDecoded);
+
+// Feeds up to len body bytes to the decoder, which plays them as they decode.
+// Gives up when the relay goes quiet, so a dead relay never hangs the robot.
+size_t feedDecoder(WiFiClient &client, size_t len) {
+  uint8_t buf[512];
+  size_t total = 0;
+  for (uint32_t last = millis(); total < len && millis() - last < READ_TIMEOUT_MS;) {
+    int n = client.read(buf, min(sizeof(buf), len - total));
+    if (n < 0) break;  // connection error
+    if (n == 0) {
+      delay(2);
+      continue;
+    }
+    mp3.write(buf, n);
+    total += n;
+    last = millis();
+  }
+  return total;
+}
+
+// One conversation turn. Returns a short error status, or nullptr when it ended normally.
+const char *talk() {
+  if (WiFi.status() != WL_CONNECTED) return connectWifi() ? nullptr : "No Wi-Fi";
+
+  drawFace("Listening...", false);
+  i2s_zero_dma_buffer(MIC_PORT);  // drop audio captured before the button press
+  WiFiClient client;
+  if (!client.connect(RELAY_HOST, RELAY_PORT, CONNECT_TIMEOUT_MS)) return "No relay";
+  client.printf("POST /talk HTTP/1.1\r\nHost: %s:%d\r\nAuthorization: Bearer %s\r\n"
+                "Content-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                RELAY_HOST, RELAY_PORT, RELAY_TOKEN);
+  streamMic(client);
+  // If the relay already answered it stopped reading: writing more could reset the connection.
+  if (!client.available()) client.print("0\r\n\r\n");
+  if (!client.connected()) return "No relay";
+
+  drawFace("Thinking...", false);
+  client.setTimeout(ANSWER_TIMEOUT_MS);
+  String statusLine = client.readStringUntil('\n');  // "HTTP/1.1 200 OK"
+  if (statusLine.isEmpty()) return "No relay";
+  int code = statusLine.substring(9, 12).toInt();
+  Serial.printf("HTTP %d\n", code);
+  if (code == 204) return "Didn't hear";
+  if (code == 401) return "Bad token";
+  if (code != 200) {
+    static char error[16];
+    snprintf(error, sizeof(error), "Error %d", code);
+    return error;
+  }
+
+  client.setTimeout(READ_TIMEOUT_MS);
+  size_t length = SIZE_MAX;  // no Content-Length: read until the relay goes quiet
+  bool chunked = false;
+  for (String line; (line = client.readStringUntil('\n')).length() > 1;) {
+    line.toLowerCase();
+    if (line.startsWith("content-length:")) length = line.substring(15).toInt();
+    if (line.startsWith("transfer-encoding:") && line.indexOf("chunked") > 0) chunked = true;
+  }
+
+  drawFace("Speaking...", true);
+  if (!mp3.begin()) return "No memory";
+  Serial.printf("Heap while decoding: %lu free\n", ESP.getFreeHeap());
+  size_t received = 0;
+  if (chunked) {
+    for (size_t size; (size = strtoul(client.readStringUntil('\n').c_str(), nullptr, 16)) > 0;) {
+      received += feedDecoder(client, size);
+      client.readStringUntil('\n');  // CRLF after the chunk data
+    }
+  } else {
+    received = feedDecoder(client, length);
+  }
+  mp3.end();  // also plays the frames still buffered, then frees the decoder
+  Serial.printf("Received %u bytes\n", received);
+  if (ampRate != SAMPLE_RATE) {
+    delay(150);  // let the queued audio finish before changing the clock
+    ampRate = SAMPLE_RATE;
+    i2s_set_sample_rates(AMP_PORT, SAMPLE_RATE);  // Button 2's tone is 16 kHz
+  }
+  return nullptr;
 }
 
 void playTone() {
@@ -178,22 +311,21 @@ void setup() {
   setupMic();
   setupAmp();
 
-  // No PSRAM: take as much of the 3 s buffer as the largest free heap block allows.
-  size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) - 4096;
-  recordCapacity = min(MAX_RECORD_SAMPLES, largest / sizeof(int16_t));
-  recording = (int16_t *)malloc(recordCapacity * sizeof(int16_t));
-  Serial.printf("Recording buffer: %.1f s\n", (float)recordCapacity / SAMPLE_RATE);
-
-  drawFace("Ready", false);
+  // Without Wi-Fi the robot still runs; Button 1 retries the connection.
+  drawFace(connectWifi() ? "Ready" : "No Wi-Fi", false);
 }
 
 void loop() {
   if (digitalRead(PIN_BTN_TALK) == LOW) {
-    drawFace("Listening...", false);
-    size_t count = record();
-    drawFace("Speaking...", true);
-    play(recording, count);
+    Serial.printf("Heap before turn: %lu free\n", ESP.getFreeHeap());
+    const char *error = talk();
+    Serial.printf("Heap after turn: %lu free, lowest since boot %lu\n", ESP.getFreeHeap(), ESP.getMinFreeHeap());
+    if (error) {
+      drawFace(error, false);
+      delay(2000);
+    }
     drawFace("Ready", false);
+    while (digitalRead(PIN_BTN_TALK) == LOW) delay(5);  // one press, one turn
   } else if (pressed(PIN_BTN_TONE)) {
     drawFace("Tone", true);
     playTone();
