@@ -43,4 +43,14 @@ Delivery: `ask-on-risk` (forecast ~550 authored lines, chain strategy pending be
 - **L12 (2026-11-06, user):** "no se puede usar https://github.com/debpalash/VoiceStudio"
 - **L13 (2026-11-06, user):** "usa voiceStudio, me da igual depender del pc, en un futuro el servidor que use será uno propio (home server) y ya lo pondré ahi todo" — S2 and S3 rewritten; T5 added for the relay TTS step.
 - **L14 (evidence, T5):** VoiceStudio (commit 12e6578) serves `POST http://127.0.0.1:3900/v1/audio/speech` (OpenAI-compatible, `backend/api/routers/openai_compat.py:150,649`); `response_format` includes mp3; raw audio bytes come back; `tts-1` is an alias for the active engine; loopback callers need no key ("loopback-only and unauthenticated by default", `docs/api-auth.md:6`); the desktop app binds 127.0.0.1 only; OmniVoice outputs 24 kHz mono and supports `es`; the active engine's licence must be accepted in the app. A `wrangler dev` Worker reached a 127.0.0.1 service in a scratch test ("upstream 200"). The firmware answer timeout went from 30 s to 60 s because VoiceStudio renders the whole clip first and is slow on CPU. Not verified live: a full turn, VoiceStudio latency on this PC, voice consistency with `"default"`.
-- **Next:** native review, then the user's hardware test (VoiceStudio open, `wrangler login`, `npm run dev`, flash).
+- **L15 (native review):** Review `review-8980160e6bb3fc0f` of `6960945..a2eaab3` (lenses risk, resilience, reliability; consent granted by the user) ended **approved** and was acknowledged (authority burned). Non-blocking follow-ups:
+  - F1 relay: no timeout on the VoiceStudio fetch, so a hung render never returns 502 before the firmware gives up (`relay/src/index.ts`).
+  - F2 firmware: an answer slower than 60 s shows "No relay" instead of a timeout status (`src/main.cpp:234-236`).
+  - F3 firmware: a very short press sends an empty body and shows "Error 400" (`src/main.cpp:228-231`).
+  - F4 relay: the example token `change-me` is accepted as valid.
+  - F5 tests: no 502 case for an empty chat reply or a Whisper result without `text`.
+  - F6 accepted: the token travels in plain HTTP on the LAN (HTTPS out of v1).
+  - F7: transcripts and replies are logged; gate before any public deploy.
+  - F8: the Gemma reply shape is only checked against the mock; confirm on the first live turn.
+  - F9: mic audio lost during Wi-Fi stalls over ~128 ms is not reported.
+- **Next:** the user's hardware test (VoiceStudio open, `wrangler login`, `npm run dev`, flash); F1–F5 only if the user asks.
