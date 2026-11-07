@@ -2,15 +2,17 @@
 
 Desktop companion robot built on an ESP32. Hardware and wiring: [COMPONENTS.md](COMPONENTS.md).
 
-## v1 — talk to Maiky
+## v1 — talk to Maiky (complete)
 
-![Maiky: ESP32 wired to a breadboard with the amplifier, speaker, three buttons and the OLED showing its face](images/maiky.jpeg)
+Hold a button, ask Maiky something in Spanish, and hear the AI answer through its speaker.
+
+![Maiky: ESP32 wired to a breadboard with the amplifier, speaker, three buttons and the OLED showing its face](images/maiky_pixel.gif)
 
 - **Button 1** (hold): ask something; release to hear the answer. The screen shows "Listening...", "Thinking..." and "Speaking...".
 - **Button 2**: play a 440 Hz test tone.
 - **Button 3**: cycle the volume (5%, 10%, 20%).
 
-Each question is independent: Maiky does not remember earlier turns yet. Needs the [relay](#run-the-relay) running.
+Needs the [relay](#run-the-relay) running.
 
 | Screen | Meaning |
 |--------|---------|
@@ -18,17 +20,32 @@ Each question is independent: Maiky does not remember earlier turns yet. Needs t
 | No relay | The relay is not running or not reachable at `RELAY_HOST:RELAY_PORT`. |
 | Bad token | `RELAY_TOKEN` differs between `src/secrets.h` and `relay/.dev.vars`. |
 | Didn't hear | The relay found no speech in the recording. |
-| Error &lt;code&gt; | The relay answered with that HTTP status (502 = an AI service failed or VoiceStudio is not running; the relay terminal shows which). |
-| No memory | Not enough RAM to decode the answer. |
+| Error &lt;code&gt; | The relay answered with that HTTP status (502 = an AI service failed or Piper is not running; the relay terminal shows which). |
+| Bad audio | The answer was not a 16-bit mono WAV. |
+
+### Limitations
+
+- **No memory.** Every question is independent: Maiky does not remember anything said in earlier turns.
+- **No internet access.** Maiky only knows what the chat model learned in training, so it cannot even tell today's date.
 
 ## Run the relay
 
-Maiky talks to the AI through a small Cloudflare Worker in [relay/](relay/). It turns your voice into text (Whisper) and asks a chat model (Gemma) for an answer on the Workers AI free plan (10,000 neurons per day), then has [VoiceStudio](https://github.com/debpalash/VoiceStudio) speak the answer. For now everything runs on your PC.
+Maiky talks to the AI through a small Cloudflare Worker in [relay/](relay/). It turns your voice into text (Whisper) and asks a chat model (Gemma) for an answer on the Workers AI free plan (10,000 neurons per day), then has a local [Piper](https://github.com/OHF-Voice/piper1-gpl) server speak the answer, in about 0.3 s on a PC without a GPU. For now everything runs on your PC.
 
-Requires [Node.js](https://nodejs.org/), a free Cloudflare account and VoiceStudio:
+Requires [Node.js](https://nodejs.org/), [Python](https://www.python.org/) 3.12 and a free Cloudflare account. First start Piper with a Spanish voice and keep it running (the relay calls it at `http://127.0.0.1:5000`, set by `PIPER_URL` in [relay/wrangler.jsonc](relay/wrangler.jsonc)). Piper and its voices live in the git-ignored `.piper/` folder, away from your global Python. From the repository root, in PowerShell:
 
-1. Install and open VoiceStudio, and accept the licence of its active voice engine (Spanish works with the default OmniVoice engine). Keep the app open: the relay calls its local API at `http://127.0.0.1:3900`.
-2. Optional: save a voice profile in VoiceStudio and put its id in `VOICESTUDIO_VOICE` in [relay/wrangler.jsonc](relay/wrangler.jsonc). With `"default"` the engine picks the voice itself.
+```powershell
+# Once: create the environment, install Piper and download a voice
+# (other voices: es_ES-sharvard-medium, es_MX-claude-high...)
+py -3.12 -m venv .piper
+.\.piper\Scripts\python -m pip install "piper-tts[http]"
+.\.piper\Scripts\python -m piper.download_voices --data-dir .piper es_ES-davefx-medium
+
+# Every time: start the server
+.\.piper\Scripts\python -m piper.http_server --data-dir .piper -m es_ES-davefx-medium
+```
+
+Then, in another terminal:
 
 ```sh
 cd relay
@@ -50,3 +67,7 @@ cp src/secrets.example.h src/secrets.h   # then fill in Wi-Fi, the PC's LAN IP a
 pio run -t upload      # build and flash
 pio device monitor     # serial log (115200 baud)
 ```
+
+If PowerShell does not find `pio`, call it as `& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe"` or add that folder to your user `Path`.
+
+After each question the serial log prints `Sent <bytes>, peak slot0 <a>, slot1 <b>`. While you talk, one slot should peak at a few thousand. Peaks in the hundreds of thousands mean the microphone sends noise, usually a loose jumper on `SD` (GPIO34), and the relay then fails with `Error 502`.

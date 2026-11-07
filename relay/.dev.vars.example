@@ -1,3 +1,1 @@
 RELAY_TOKEN=change-me
-# Only when VoiceStudio runs on another machine or in Docker (its OMNIVOICE_API_KEY):
-# VOICESTUDIO_API_KEY=

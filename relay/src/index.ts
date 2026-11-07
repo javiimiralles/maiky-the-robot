@@ -1,5 +1,5 @@
-// Relay between Maiky (ESP32) and the AI services: PCM in, spoken MP3 answer out.
-// Speech-to-text and the reply run on Cloudflare Workers AI; the voice comes from VoiceStudio.
+// Relay between Maiky (ESP32) and the AI services: PCM in, spoken WAV answer out.
+// Speech-to-text and the reply run on Cloudflare Workers AI; the voice comes from a Piper server.
 
 const STT_MODEL = "@cf/openai/whisper-large-v3-turbo";
 const CHAT_MODEL = "@cf/google/gemma-4-26b-a4b-it";
@@ -16,10 +16,11 @@ const MAX_PCM_BYTES = 15 * SAMPLE_RATE * 2; // 15 s of 16-bit mono = 480,000 byt
 interface Env {
   AI: Ai;
   RELAY_TOKEN?: string;
-  VOICESTUDIO_URL: string;
-  VOICESTUDIO_VOICE: string;
-  VOICESTUDIO_API_KEY?: string;
+  PIPER_URL: string;
 }
+
+// Piper answers in well under a second; past this it is hung, so fail with a 502.
+const TTS_TIMEOUT_MS = 10000;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -52,9 +53,9 @@ export default {
       if (!reply) throw new Error("Chat model returned no text");
       console.log(`Reply: ${reply}`);
 
-      const mp3 = await speak(reply, env);
-      if (!mp3.length) throw new Error("VoiceStudio returned no audio");
-      return new Response(mp3, { headers: { "Content-Type": "audio/mpeg" } });
+      const wav = await speak(reply, env);
+      if (new TextDecoder().decode(wav.subarray(0, 4)) !== "RIFF") throw new Error("Piper returned no WAV");
+      return new Response(wav, { headers: { "Content-Type": "audio/wav" } });
     } catch (err) {
       console.error("AI call failed:", err);
       return text(502, "AI service failed");
@@ -130,23 +131,15 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-// VoiceStudio's OpenAI-compatible endpoint answers with the raw MP3 bytes.
-// "tts-1" means whichever engine is active in the VoiceStudio app. Callers on the
-// same machine need no key; VOICESTUDIO_API_KEY is for a remote or Docker install.
+// Piper's HTTP server (piper-tts[http]) answers with a 16-bit mono WAV in the voice it
+// was started with (`-m`). It labels the WAV as text/html, so the type is not checked.
 async function speak(text: string, env: Env): Promise<Uint8Array> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (env.VOICESTUDIO_API_KEY) headers.Authorization = `Bearer ${env.VOICESTUDIO_API_KEY}`;
-  const res = await fetch(`${env.VOICESTUDIO_URL}/v1/audio/speech`, {
+  const res = await fetch(`${env.PIPER_URL}/synthesize`, {
     method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: "tts-1",
-      input: text,
-      voice: env.VOICESTUDIO_VOICE,
-      response_format: "mp3",
-      language: "es",
-    }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+    signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`VoiceStudio answered ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`Piper answered ${res.status}: ${await res.text()}`);
   return new Uint8Array(await res.arrayBuffer());
 }

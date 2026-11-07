@@ -7,7 +7,6 @@
 #include <WiFi.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <MP3DecoderHelix.h>
 #include <driver/i2s.h>
 
 #if __has_include("secrets.h")
@@ -38,8 +37,8 @@ constexpr int MIC_SHIFT = 11;
 // The relay accepts at most 15 s of 16-bit mono audio.
 constexpr size_t MAX_UPLOAD_BYTES = 15 * SAMPLE_RATE * sizeof(int16_t);
 constexpr int32_t CONNECT_TIMEOUT_MS = 3000;
-// Speech-to-text + LLM + text-to-speech. VoiceStudio renders the whole answer first and is slow without a GPU.
-constexpr unsigned long ANSWER_TIMEOUT_MS = 60000;
+// Speech-to-text + LLM + text-to-speech: a few seconds in total, Piper itself well under one.
+constexpr unsigned long ANSWER_TIMEOUT_MS = 20000;
 constexpr unsigned long READ_TIMEOUT_MS = 5000;
 
 // A 3 W speaker at 5V is already very loud at 25%, so stay well below it.
@@ -179,25 +178,63 @@ void play(const int16_t *samples, size_t count) {
   }
 }
 
-// Decoder output: match the amp clock to the MP3 and fold stereo into mono for play().
-void playDecoded(MP3FrameInfo &info, short *pcm, size_t len, void *) {
-  if ((uint32_t)info.samprate != ampRate) {
-    ampRate = info.samprate;
+// The answer is a WAV file. Piper always writes the plain 44-byte header, then 16-bit PCM.
+struct WavStream {
+  uint8_t header[44];
+  size_t headerLen = 0;
+  bool valid = false;
+  int lowByte = -1;  // first half of a sample split across two reads
+};
+WavStream wav;
+
+// Accepts only 16-bit mono PCM and sets the amp clock to its sample rate.
+bool startWav() {
+  const uint8_t *h = wav.header;
+  uint16_t format, channels, bits;
+  uint32_t rate;
+  memcpy(&format, h + 20, 2);
+  memcpy(&channels, h + 22, 2);
+  memcpy(&rate, h + 24, 4);
+  memcpy(&bits, h + 34, 2);
+  if (memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4) || memcmp(h + 12, "fmt ", 4) || memcmp(h + 36, "data", 4) ||
+      format != 1 || channels != 1 || bits != 16) {
+    return false;
+  }
+  if (rate != ampRate) {
+    ampRate = rate;
     i2s_set_sample_rates(AMP_PORT, ampRate);
-    Serial.printf("MP3: %d Hz, %d channel(s)\n", info.samprate, info.nChans);
   }
-  if (info.nChans == 2) {
-    len /= 2;
-    for (size_t i = 0; i < len; i++) pcm[i] = (pcm[2 * i] + pcm[2 * i + 1]) / 2;
-  }
-  play(pcm, len);
+  Serial.printf("WAV: %lu Hz\n", rate);
+  return true;
 }
 
-libhelix::MP3DecoderHelix mp3(playDecoded);
+// Plays body bytes as they arrive: the header first, then little-endian samples.
+void writeWav(const uint8_t *data, size_t n) {
+  for (; n && wav.headerLen < sizeof(wav.header); n--) {
+    wav.header[wav.headerLen++] = *data++;
+    if (wav.headerLen == sizeof(wav.header)) wav.valid = startWav();
+  }
+  if (!wav.valid) return;
+  int16_t samples[256];
+  size_t count = 0;
+  for (; n; n--) {
+    if (wav.lowByte < 0) {
+      wav.lowByte = *data++;
+      continue;
+    }
+    samples[count++] = (int16_t)(wav.lowByte | (*data++ << 8));
+    wav.lowByte = -1;
+    if (count == 256) {
+      play(samples, count);
+      count = 0;
+    }
+  }
+  if (count) play(samples, count);
+}
 
-// Feeds up to len body bytes to the decoder, which plays them as they decode.
+// Plays up to len body bytes as they arrive.
 // Gives up when the relay goes quiet, so a dead relay never hangs the robot.
-size_t feedDecoder(WiFiClient &client, size_t len) {
+size_t feedAudio(WiFiClient &client, size_t len) {
   uint8_t buf[512];
   size_t total = 0;
   for (uint32_t last = millis(); total < len && millis() - last < READ_TIMEOUT_MS;) {
@@ -207,7 +244,7 @@ size_t feedDecoder(WiFiClient &client, size_t len) {
       delay(2);
       continue;
     }
-    mp3.write(buf, n);
+    writeWav(buf, n);
     total += n;
     last = millis();
   }
@@ -254,25 +291,23 @@ const char *talk() {
   }
 
   drawFace("Speaking...", true);
-  if (!mp3.begin()) return "No memory";
-  Serial.printf("Heap while decoding: %lu free\n", ESP.getFreeHeap());
+  wav = WavStream();
   size_t received = 0;
   if (chunked) {
     for (size_t size; (size = strtoul(client.readStringUntil('\n').c_str(), nullptr, 16)) > 0;) {
-      received += feedDecoder(client, size);
+      received += feedAudio(client, size);
       client.readStringUntil('\n');  // CRLF after the chunk data
     }
   } else {
-    received = feedDecoder(client, length);
+    received = feedAudio(client, length);
   }
-  mp3.end();  // also plays the frames still buffered, then frees the decoder
   Serial.printf("Received %u bytes\n", received);
   if (ampRate != SAMPLE_RATE) {
     delay(150);  // let the queued audio finish before changing the clock
     ampRate = SAMPLE_RATE;
     i2s_set_sample_rates(AMP_PORT, SAMPLE_RATE);  // Button 2's tone is 16 kHz
   }
-  return nullptr;
+  return wav.valid ? nullptr : "Bad audio";
 }
 
 void playTone() {

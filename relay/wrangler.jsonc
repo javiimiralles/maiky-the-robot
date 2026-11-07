@@ -7,11 +7,10 @@
   "ai": {
     "binding": "AI"
   },
-  // Text-to-speech: the VoiceStudio app on this machine. VOICESTUDIO_VOICE is "default"
-  // (the engine picks a voice) or the id of a voice profile saved in VoiceStudio.
+  // Text-to-speech: the Piper HTTP server on this machine. Use 127.0.0.1, not localhost:
+  // on Windows localhost tries IPv6 first and adds ~2 s to every answer.
   "vars": {
-    "VOICESTUDIO_URL": "http://127.0.0.1:3900",
-    "VOICESTUDIO_VOICE": "default"
+    "PIPER_URL": "http://127.0.0.1:5000"
   }
   // RELAY_TOKEN: `.dev.vars` locally, `wrangler secret put RELAY_TOKEN` once deployed.
 }

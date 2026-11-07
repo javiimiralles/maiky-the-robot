@@ -2,16 +2,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 
 const TOKEN = "test-token";
-const VOICESTUDIO_URL = "http://127.0.0.1:3900";
-const MP3 = new Uint8Array([0xff, 0xfb, 0x90, 0x44, 1, 2, 3]);
+const PIPER_URL = "http://127.0.0.1:5000";
+const WAV = new Uint8Array([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4]);
 const REPLY = "¡Hola! Soy Maiky.";
 
 const fromBase64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
-// Workers AI does speech-to-text and the reply; VoiceStudio (a plain HTTP fetch) does the speech.
+// Workers AI does speech-to-text and the reply; Piper (a plain HTTP fetch) does the speech.
+// Piper's server labels its WAV as text/html, so the mock does too.
 function makeEnv(
   overrides: Partial<Record<string, (input: any) => unknown>> = {},
-  voiceStudio: () => Response | Promise<Response> = () => new Response(MP3, { headers: { "Content-Type": "audio/mpeg" } }),
+  piper: () => Response | Promise<Response> = () => new Response(WAV, { headers: { "Content-Type": "text/html; charset=utf-8" } }),
 ) {
   const outputs: Record<string, (input: any) => unknown> = {
     "@cf/openai/whisper-large-v3-turbo": () => ({ text: " Hola, ¿qué tal? " }),
@@ -19,9 +20,9 @@ function makeEnv(
     ...overrides,
   };
   const run = vi.fn(async (model: string, input: unknown) => outputs[model](input));
-  const speech = vi.fn(async (_url: string, _init: RequestInit) => voiceStudio());
+  const speech = vi.fn(async (_url: string, _init: RequestInit) => piper());
   vi.stubGlobal("fetch", speech);
-  const env = { RELAY_TOKEN: TOKEN, AI: { run }, VOICESTUDIO_URL, VOICESTUDIO_VOICE: "default" } as any;
+  const env = { RELAY_TOKEN: TOKEN, AI: { run }, PIPER_URL } as any;
   return { env, run, speech };
 }
 
@@ -111,7 +112,7 @@ describe("POST /talk", () => {
     expect(res.headers.get("Content-Type")).toMatch(/^text\/plain/);
   });
 
-  it("returns the MP3 answer for a chunked PCM upload", async () => {
+  it("returns the WAV answer for a chunked PCM upload", async () => {
     const { env, run, speech } = makeEnv();
     const chunks = [new Uint8Array([1, 0, 2]), new Uint8Array([0, 3, 0])];
     const body = new ReadableStream<Uint8Array>({
@@ -124,8 +125,8 @@ describe("POST /talk", () => {
     const res = await worker.fetch(talk(body), env);
 
     expect(res.status).toBe(200);
-    expect(res.headers.get("Content-Type")).toBe("audio/mpeg");
-    expect(new Uint8Array(await res.arrayBuffer())).toEqual(MP3);
+    expect(res.headers.get("Content-Type")).toBe("audio/wav");
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(WAV);
 
     expect(run.mock.calls.map((c) => c[0])).toEqual([
       "@cf/openai/whisper-large-v3-turbo",
@@ -142,34 +143,21 @@ describe("POST /talk", () => {
 
     expect(speech).toHaveBeenCalledTimes(1);
     const [url, init] = speech.mock.calls[0];
-    expect(url).toBe(`${VOICESTUDIO_URL}/v1/audio/speech`);
+    expect(url).toBe(`${PIPER_URL}/synthesize`);
     expect(init.method).toBe("POST");
     expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
-    expect(new Headers(init.headers).has("Authorization")).toBe(false);
-    expect(JSON.parse(init.body as string)).toEqual({
-      model: "tts-1",
-      input: REPLY,
-      voice: "default",
-      response_format: "mp3",
-      language: "es",
-    });
+    expect(JSON.parse(init.body as string)).toEqual({ text: REPLY });
+    expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("sends the configured voice and API key to VoiceStudio", async () => {
-    const { env, speech } = makeEnv();
-    const configured = { ...env, VOICESTUDIO_VOICE: "maiky", VOICESTUDIO_API_KEY: "vs-key" };
-    expect((await worker.fetch(talk(new Uint8Array(4)), configured)).status).toBe(200);
-    const [, init] = speech.mock.calls[0];
-    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer vs-key");
-    expect(JSON.parse(init.body as string).voice).toBe("maiky");
-  });
-
-  it("returns 502 when VoiceStudio fails, is not running, or returns no audio", async () => {
+  it("returns 502 when Piper fails, is not running, times out, or returns no WAV", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const failures = [
-      () => new Response('{"error":{"message":"busy"}}', { status: 503 }),
+      () => new Response("Internal Server Error", { status: 500 }),
       () => Promise.reject(new TypeError("fetch failed")),
-      () => new Response(new Uint8Array(0), { headers: { "Content-Type": "audio/mpeg" } }),
+      () => Promise.reject(new DOMException("The operation timed out.", "TimeoutError")),
+      () => new Response(new Uint8Array(0)),
+      () => new Response("<html>not audio</html>"),
     ];
     for (const failure of failures) {
       const { env } = makeEnv({}, failure);
